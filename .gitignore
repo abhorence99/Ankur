@@ -57,3 +57,4 @@ temp_*.py
 # Example HTML responses (for debugging)
 example_*.html
 response_*.html
+apra_search_results.html

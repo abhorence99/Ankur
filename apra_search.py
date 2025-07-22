@@ -1,40 +1,29 @@
 #!/usr/bin/env uv run python
 """
-APRA AMCOS Song Catalogue Search Script (Final Version)
+APRA AMCOS Song Catalogue Search Script (Production Version)
 
-Searches the APRA AMCOS catalogue for songs by title, writer surname, or performer name.
-Can be used from command line for single searches or imported for batch processing.
+Searches the APRA AMCOS catalogue using Playwright with proper JavaScript handling.
+Replaces the original apra_search.py with a working Playwright implementation.
 """
 
 import argparse
 import sys
-import urllib.parse
 import re
+import time
 from typing import Dict, List, Optional, Any
-import requests
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from bs4 import BeautifulSoup
 
 
 def search_apra_catalogue(title: Optional[str] = None, 
                          writer_surname: Optional[str] = None, 
-                         performer: Optional[str] = None) -> Dict[str, Any]:
+                         performer: Optional[str] = None,
+                         headless: bool = True,
+                         verbose: bool = False) -> Dict[str, Any]:
     """
-    Search APRA AMCOS Song Catalogue
-    
-    Args:
-        title: Song title to search for
-        writer_surname: Writer's surname (last name only)
-        performer: Performer name
-    
-    Returns:
-        dict with:
-            - 'found': bool - whether results were found
-            - 'count': int - number of results
-            - 'results': list - parsed result details
-            - 'message': str - status message
+    Search APRA AMCOS Song Catalogue using Playwright browser automation
     """
     
-    # Ensure at least title or performer is provided
     if not title and not performer:
         return {
             'found': False,
@@ -43,126 +32,231 @@ def search_apra_catalogue(title: Optional[str] = None,
             'message': 'Error: Title or performer is required for search'
         }
     
-    # Create session for cookie handling
-    session = requests.Session()
-    
-    try:
-        # First, visit the search page to get any necessary cookies/session data
-        base_url = "https://www.apraamcos.com.au/works-search"
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-        }
-        
-        # Get the initial page
-        response = session.get(base_url, headers=headers, timeout=30)
-        response.raise_for_status()
-        
-        # Now try the search with parameters
-        params = {'works': 'true'}
-        
-        if title:
-            params['title'] = title
-        if writer_surname:
-            params['writer'] = writer_surname  
-        if performer:
-            params['performer'] = performer
-        
-        # Try both GET and POST approaches
-        search_url = f"{base_url}?{urllib.parse.urlencode(params)}"
-        
-        # Update headers for search request
-        headers.update({
-            'Referer': base_url,
-            'Sec-Fetch-Site': 'same-origin',
-        })
-        
-        # Try GET request first
-        search_response = session.get(search_url, headers=headers, timeout=30)
-        search_response.raise_for_status()
-        
-        # Parse the response
-        result = parse_search_results(search_response.text, search_url)
-        
-        # If GET didn't work, try POST
-        if not result['found']:
-            headers.update({
-                'Content-Type': 'application/x-www-form-urlencoded',
-            })
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=headless, timeout=90000)
+            context = browser.new_context(
+                user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            )
+            page = context.new_page()
+            page.set_default_timeout(60000)
             
-            post_response = session.post(base_url, data=params, headers=headers, timeout=30)
-            post_response.raise_for_status()
+            if verbose:
+                print("Loading APRA AMCOS search page...", file=sys.stderr)
             
-            result = parse_search_results(post_response.text, search_url)
-        
-        return result
-        
-    except requests.exceptions.RequestException as e:
-        return {
-            'found': False,
-            'count': 0,
-            'results': [],
-            'message': f'Network error: {str(e)}'
-        }
-    except Exception as e:
-        return {
-            'found': False,
-            'count': 0,
-            'results': [],
-            'message': f'Error: {str(e)}'
-        }
+            # Load the page
+            page.goto("https://www.apraamcos.com.au/works-search", wait_until="domcontentloaded")
+            page.wait_for_timeout(3000)  # Wait for dynamic content
+            
+            if verbose:
+                print("Filling search form...", file=sys.stderr)
+            
+            # Use JavaScript to find, fill, and submit the form
+            search_script = f"""
+            () => {{
+                // Find search inputs by placeholder
+                const inputs = document.querySelectorAll('input[type="search"]');
+                let titleInput = null;
+                let writerInput = null;
+                let performerInput = null;
+                
+                inputs.forEach(input => {{
+                    const placeholder = input.placeholder || '';
+                    if (placeholder.toLowerCase().includes('song title')) {{
+                        titleInput = input;
+                    }} else if (placeholder.toLowerCase().includes('writer')) {{
+                        writerInput = input;
+                    }} else if (placeholder.toLowerCase().includes('performer')) {{
+                        performerInput = input;
+                    }}
+                }});
+                
+                // Fill the fields
+                const fillField = (input, value) => {{
+                    if (input && value) {{
+                        input.value = value;
+                        input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        return true;
+                    }}
+                    return false;
+                }};
+                
+                const filled = {{
+                    title: fillField(titleInput, "{title or ''}"),
+                    writer: fillField(writerInput, "{writer_surname or ''}"),
+                    performer: fillField(performerInput, "{performer or ''}")
+                }};
+                
+                // Submit the search
+                if (titleInput) {{
+                    titleInput.focus();
+                    titleInput.dispatchEvent(new KeyboardEvent('keydown', {{
+                        key: 'Enter',
+                        code: 'Enter',
+                        which: 13,
+                        keyCode: 13,
+                        bubbles: true
+                    }}));
+                }}
+                
+                return filled;
+            }}
+            """
+            
+            # Execute the form filling and submission
+            fill_result = page.evaluate(search_script)
+            
+            if verbose:
+                print(f"Form filled: {fill_result}", file=sys.stderr)
+                print("Waiting for search results...", file=sys.stderr)
+            
+            # Wait for results to load - try multiple strategies
+            results_loaded = False
+            
+            # Strategy 1: Wait for URL to include search parameters
+            for i in range(15):  # 15 seconds max
+                current_url = page.url
+                if 'title=' in current_url or 'performer=' in current_url:
+                    if verbose:
+                        print(f"✓ Search URL detected: {current_url}", file=sys.stderr)
+                    break
+                page.wait_for_timeout(1000)
+            
+            # Strategy 2: Wait for dynamic content to appear
+            page.wait_for_timeout(5000)  # Base wait for content to load
+            
+            # Strategy 3: Extended wait for results with checking
+            for attempt in range(20):  # Check every 2 seconds for up to 40 seconds
+                try:
+                    # Check for various result indicators
+                    page_content = page.content()
+                    soup = BeautifulSoup(page_content, 'html.parser')
+                    
+                    # Check for result divs
+                    result_divs = soup.find_all('div', id=re.compile(r'^GW\d+'))
+                    if result_divs:
+                        if verbose:
+                            print(f"✓ Found {len(result_divs)} work containers", file=sys.stderr)
+                        results_loaded = True
+                        break
+                    
+                    # Check for results header
+                    results_header = soup.find('h6', string=re.compile(r'\d+\s+results?'))
+                    if results_header:
+                        if verbose:
+                            print(f"✓ Found results header: {results_header.get_text()}", file=sys.stderr)
+                        results_loaded = True
+                        break
+                    
+                    # Check page text for our search terms
+                    page_text = soup.get_text().lower()
+                    if title and title.lower() in page_text and ('writer' in page_text or 'performer' in page_text):
+                        if verbose:
+                            print("✓ Found search term in results content", file=sys.stderr)
+                        results_loaded = True
+                        break
+                    
+                    # Check for "no results" message
+                    if 'no results' in page_text or '0 results' in page_text:
+                        if verbose:
+                            print("✓ 'No results' message detected", file=sys.stderr)
+                        results_loaded = True
+                        break
+                        
+                except Exception as e:
+                    if verbose:
+                        print(f"Error checking results (attempt {attempt + 1}): {e}", file=sys.stderr)
+                
+                # Progress indicator
+                if verbose and (attempt + 1) % 5 == 0:
+                    print(f"Still waiting for results... ({(attempt + 1) * 2}s)", file=sys.stderr)
+                
+                page.wait_for_timeout(2000)  # Wait 2 seconds before next check
+            
+            # Get final page content
+            final_content = page.content()
+            
+            # Save for debugging
+            with open('apra_search_results.html', 'w', encoding='utf-8') as f:
+                f.write(final_content)
+            
+            if verbose:
+                print("✓ Final content saved to apra_search_results.html", file=sys.stderr)
+            
+            # Parse the results
+            result = parse_search_results(final_content, page.url, verbose)
+            return result
+            
+        except Exception as e:
+            return {
+                'found': False,
+                'count': 0,
+                'results': [],
+                'message': f'Search error: {str(e)}'
+            }
+        finally:
+            if 'browser' in locals():
+                browser.close()
 
 
-def parse_search_results(html_content: str, search_url: str) -> Dict[str, Any]:
+def parse_search_results(html_content: str, search_url: str, verbose: bool = False) -> Dict[str, Any]:
     """Parse HTML response to extract search results"""
     
     soup = BeautifulSoup(html_content, 'html.parser')
     
-    # Look for results count
+    # Look for results count header
     results_header = soup.find('h6', string=re.compile(r'\d+\s+results?'))
     
-    if not results_header:
+    # Look for work containers
+    result_divs = soup.find_all('div', id=re.compile(r'^GW\d+'))
+    
+    if verbose:
+        print(f"Parsing results: header={'found' if results_header else 'not found'}, containers={len(result_divs)}", file=sys.stderr)
+    
+    # Check if we have no results
+    if not results_header and not result_divs:
+        page_text = soup.get_text().lower()
+        no_results_indicators = ['no results found', '0 results', 'sorry, no results', 'nothing found']
+        
+        for indicator in no_results_indicators:
+            if indicator in page_text:
+                return {
+                    'found': False,
+                    'count': 0,
+                    'results': [],
+                    'message': 'Search completed but found no results',
+                    'search_url': search_url
+                }
+        
         return {
             'found': False,
             'count': 0,
             'results': [],
-            'message': 'No results found'
-        }
-    
-    # Extract count
-    count_match = re.search(r'(\d+)\s+results?', results_header.get_text())
-    count = int(count_match.group(1)) if count_match else 0
-    
-    if count == 0:
-        return {
-            'found': False,
-            'count': 0,
-            'results': [],
-            'message': 'No results found'
+            'message': 'No results found (check apra_search_results.html for debugging)',
+            'search_url': search_url
         }
     
     # Parse individual results
     results = []
-    
-    # Find result containers (divs with IDs starting with GW)
-    result_divs = soup.find_all('div', id=re.compile(r'^GW\d+'))
-    
     for result_div in result_divs:
-        result_data = parse_single_result(result_div)
-        if result_data:
-            results.append(result_data)
+        parsed_result = parse_single_result(result_div)
+        if parsed_result:
+            results.append(parsed_result)
+    
+    # Get count from header if available
+    count = len(results)
+    if results_header:
+        count_match = re.search(r'(\d+)\s+results?', results_header.get_text())
+        if count_match:
+            count = int(count_match.group(1))
+    
+    if verbose:
+        print(f"Parsed {len(results)} results successfully", file=sys.stderr)
     
     return {
         'found': len(results) > 0,
-        'count': len(results),
+        'count': count,
         'results': results,
         'message': f'Found {len(results)} result(s)',
         'search_url': search_url
@@ -187,10 +281,9 @@ def parse_single_result(result_div) -> Optional[Dict[str, Any]]:
         # Extract title
         title_h4 = result_div.find('h4')
         if title_h4:
-            # Remove highlight spans and get clean text
             result['title'] = ''.join(title_h4.stripped_strings)
         
-        # Parse all list items for different fields
+        # Parse list items for different fields
         list_items = result_div.find_all('li', class_='grid')
         
         for item in list_items:
@@ -209,8 +302,7 @@ def parse_single_result(result_div) -> Optional[Dict[str, Any]]:
                     for li in writer_list.find_all('li'):
                         writer_name = ''.join(li.stripped_strings)
                         if writer_name:
-                            # Clean up writer names that might be concatenated
-                            writers.append(clean_name(writer_name))
+                            writers.append(writer_name)
                 result['writers'] = writers
                 
             elif 'work id' in label:
@@ -224,14 +316,7 @@ def parse_single_result(result_div) -> Optional[Dict[str, Any]]:
                 title_list = content_div.find('ul')
                 if title_list:
                     for li in title_list.find_all('li'):
-                        title_text = li.get_text(strip=True)
-                        if title_text:
-                            titles.append(title_text)
-                else:
-                    # Handle case where titles are not in a list
-                    title_text = content_div.get_text(strip=True)
-                    if title_text and title_text != result['title']:
-                        titles = [title_text]
+                        titles.append(li.get_text(strip=True))
                 result['alternate_titles'] = titles
                 
             elif 'publishers' in label:
@@ -239,15 +324,13 @@ def parse_single_result(result_div) -> Optional[Dict[str, Any]]:
                 pub_list = content_div.find('ul')
                 if pub_list:
                     for li in pub_list.find_all('li'):
-                        pub_name = li.get_text(strip=True)
-                        if pub_name:
-                            # Clean up publisher info (remove APRA/AMCOS indicators)
-                            pub_name = re.sub(r'- APRA.*?- AMCOS.*?$', '', pub_name).strip()
-                            publishers.append(pub_name)
+                        pub_text = li.get_text(strip=True)
+                        pub_clean = re.sub(r'- APRA.*?- AMCOS.*?$', '', pub_text).strip()
+                        if pub_clean:
+                            publishers.append(pub_clean)
                 result['publishers'] = publishers
                 
             elif 'local work' in label:
-                # Check for green tick (positive) vs red cross (negative)
                 has_green_tick = content_div.find('path', fill='#0B9C00')
                 result['local_work'] = bool(has_green_tick)
                 
@@ -258,7 +341,7 @@ def parse_single_result(result_div) -> Optional[Dict[str, Any]]:
                     for li in perf_list.find_all('li'):
                         perf_name = ''.join(li.stripped_strings)
                         if perf_name:
-                            performers.append(clean_name(perf_name))
+                            performers.append(perf_name)
                 result['performers'] = performers
         
         return result
@@ -266,12 +349,6 @@ def parse_single_result(result_div) -> Optional[Dict[str, Any]]:
     except Exception as e:
         print(f"Error parsing result: {e}", file=sys.stderr)
         return None
-
-
-def clean_name(name: str) -> str:
-    """Clean up concatenated or formatted names"""
-    # For now, just return as-is, but could add logic to split concatenated names
-    return name
 
 
 def format_result_output(result: Dict[str, Any]) -> str:
@@ -310,7 +387,7 @@ def main():
         epilog="""
 Examples:
   %(prog)s --title "ordinary" --performer "alex warren"
-  %(prog)s --title "bohemian rhapsody" --writer "mercury"  
+  %(prog)s --title "bohemian rhapsody" --writer "mercury"
   %(prog)s --performer "the beatles"
         """)
     
@@ -318,6 +395,7 @@ Examples:
     parser.add_argument('--writer', '-w', help='Writer surname (last name only)')
     parser.add_argument('--performer', '-p', help='Performer name')
     parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
+    parser.add_argument('--show-browser', action='store_true', help='Show browser window (for debugging)')
     
     args = parser.parse_args()
     
@@ -339,7 +417,9 @@ Examples:
     result = search_apra_catalogue(
         title=args.title,
         writer_surname=args.writer,
-        performer=args.performer
+        performer=args.performer,
+        headless=not args.show_browser,
+        verbose=args.verbose
     )
     
     # Display results
@@ -356,6 +436,8 @@ Examples:
             print(f"\nSearch URL: {result.get('search_url', '')}", file=sys.stderr)
     else:
         print(result['message'])
+        if args.verbose:
+            print(f"Search URL: {result.get('search_url', '')}", file=sys.stderr)
         sys.exit(1)
 
 
